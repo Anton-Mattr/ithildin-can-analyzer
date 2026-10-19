@@ -7,6 +7,18 @@ once it reaches 1.0.
 
 ## [Unreleased]
 
+### Added
+
+- macOS support (Apple silicon, macOS 14+), shipped as an unsigned DMG.
+  The adapter probe looks for PEAK adapters through the MacCAN PCBUSB
+  library and for CANable / candleLight (`gs_usb`) adapters through the
+  bundled libusb, and opens a `gs_usb` adapter without root.
+
+### Fixed
+
+- PEAK adapters on macOS are listed as separate devices; MacCAN reports
+  no device ID, so they used to merge into a single "PCAN device".
+
 ## [0.1.2] - 2026-10-26
 
 ### Added

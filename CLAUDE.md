@@ -254,8 +254,11 @@ MCP layer (`src/ithildin/mcp/`):
   `QThread` (`ui/adapter_prober.py::AdapterProber`), first from
   `LeftDockWidget.start_adapter_probe()` after `MainWindow.show()`, then
   from `LeftDockWidget.rescan_adapters()` (below). The
-  supported set is deliberately narrow (`pcan`, `kvaser`, `gs_usb`,
-  `socketcan`, `ixxat`) — every name in `_SUPPORTED_BACKENDS` is a
+  supported set is deliberately narrow and per platform
+  (`supported_backends()`): `pcan`, `kvaser`, `gs_usb`, `socketcan`,
+  `ixxat` on Windows/Linux (`_SUPPORTED_BACKENDS`), only `pcan` (via the
+  user-installed MacCAN PCBUSB library) and `gs_usb` (via the bundled
+  libusb) on macOS (`_MACOS_BACKENDS`). Every probed name is a
   vendor module the probe imports (`core/bus.py::detect_configs`, or
   `_detect_gs_usb`), so adding one is paying real startup cost. Detect
   through `detect_configs`, which calls the backend's
@@ -539,7 +542,7 @@ widget (drops on the inner GraphicsView don't propagate reliably).
 | Add an MCP read tool | implement in `mcp/tools.py`, register in `mcp/server.py::register_read_tools` |
 | Add an MCP write tool | same split; the body runs inside `tools._audited` and goes through `AllowlistStore.check_*`; register an `async` wrapper in `mcp/server.py::register_write_tools` that calls it via `to_thread.run_sync` with the server's `sends` limiter |
 | Wire a `BusReader` error display | `MainWindow.report()` and per-view banners |
-| Add or re-enable a CAN backend | `ui/adapter_prober.py::_SUPPORTED_BACKENDS` + `workspace/schema.py::SupportedInterface` (must update both) + `hiddenimports` in `packaging/ithildin.spec` (and `collect_dynamic_libs` for a native library it bundles) + an enricher in `ui/adapter_enrich.py::_ENRICHERS` unless the default one labels it well; for listen-only also `LISTEN_ONLY_INTERFACES` + `core/bus.py::_apply_listen_only_kwargs`; for pinning `schema.hw_id_of` + `core/bus.py::_pin_adapter`, or its own branch in `BusWorker._open_bus` |
+| Add or re-enable a CAN backend | `ui/adapter_prober.py::_SUPPORTED_BACKENDS` / `_MACOS_BACKENDS` + `workspace/schema.py::SupportedInterface` (must update both) + `hiddenimports` in `packaging/ithildin.spec` (and `collect_dynamic_libs` for a native library it bundles) + an enricher in `ui/adapter_enrich.py::_ENRICHERS` unless the default one labels it well; for listen-only also `LISTEN_ONLY_INTERFACES` + `core/bus.py::_apply_listen_only_kwargs`; for pinning `schema.hw_id_of` + `core/bus.py::_pin_adapter`, or its own branch in `BusWorker._open_bus` |
 | Change what identifies an adapter | `workspace/schema.py::hw_id_of` / `channel_key(s)` |
 | React to a device change | `ui/main_window.py::nativeEvent` (Windows) → `LeftDockWidget.rescan_adapters` |
 | Add a vendor dep that limits the Python range | none today; make it an extra under `[project.optional-dependencies]` in `pyproject.toml` with a matching `--extra` in `.github/workflows/release.yml` |
@@ -552,7 +555,6 @@ widget (drops on the inner GraphicsView don't propagate reliably).
 
 - Not CAN FD in v0.1.
 - Not a DBC editor — read-only DBC tree only.
-- Not macOS in v1.
 - Not UDS / ISO-TP / J1939.
 
 ## Deferred features (not in v0.1)
