@@ -78,10 +78,10 @@ class DeviceInfo:
     @property
     def key(self) -> str:
         """Stable-ish identity for combo de-dup within one probe."""
-        tail = (
-            self.serial or self.model or (str(self.channels[0].channel) if self.channels else "?")
-        )
-        return f"{self.interface}:{tail}"
+        if self.serial:
+            return f"{self.interface}:{self.serial}"
+        first = str(self.channels[0].channel) if self.channels else "?"
+        return f"{self.interface}:{self.model}@{first}"
 
     @property
     def display_label(self) -> str:
@@ -245,10 +245,15 @@ def _enrich_kvaser(backend: str, configs: list[dict[str, object]]) -> list[Devic
 
 
 def _enrich_pcan(backend: str, configs: list[dict[str, object]]) -> list[DeviceInfo]:
-    """Group pcan channels by device_id; read FD + per-channel status."""
+    """Group pcan channels by device_id; read FD + per-channel status.
+
+    On macOS the MacCAN PCBUSB library reports no ``device_id``; there each
+    channel is treated as its own adapter.
+    """
     by_dev: OrderedDict[object, list[dict[str, object]]] = OrderedDict()
     for cfg in configs:
-        by_dev.setdefault(cfg.get("device_id"), []).append(cfg)
+        dev_key = cfg.get("device_id", ("channel", cfg.get("channel")))
+        by_dev.setdefault(dev_key, []).append(cfg)
 
     out: list[DeviceInfo] = []
     for dev_id, group in by_dev.items():

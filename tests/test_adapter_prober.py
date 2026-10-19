@@ -41,12 +41,6 @@ def _dev_mode(monkeypatch):  # type: ignore[no-untyped-def]
     monkeypatch.setenv("ITHILDIN_DEV", "1")
 
 
-@pytest.fixture(autouse=True)
-def _windows_backend_set(monkeypatch):  # type: ignore[no-untyped-def]
-    """The run() tests stub kvaser & co., which macOS doesn't probe."""
-    monkeypatch.setattr(prober_mod, "supported_backends", lambda: prober_mod._SUPPORTED_BACKENDS)
-
-
 def _has_virtual(rows: list) -> bool:
     """The synthetic virtual loopback is emitted at the end in dev mode."""
     return any(getattr(r, "interface", None) == "virtual" for r in rows)
@@ -500,3 +494,13 @@ def test_two_ixxat_devices_each_get_their_channel_0(qtbot) -> None:  # type: ign
         (0, "HW100001"),
         (0, "HW200002"),
     ]
+
+
+def test_pcan_probe_without_pcbusb_returns_no_devices(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A Mac without MacCAN's PCBUSB installed: no PEAK rows, no exception."""
+    from can.interfaces.pcan import basic
+
+    monkeypatch.setattr(basic, "find_library", lambda name: None)
+    with pytest.raises(OSError, match="library not found"):
+        basic.PCANBasic()
+    assert prober_mod._detect_and_enrich("pcan") == []

@@ -283,3 +283,18 @@ def test_gs_usb_serial_identifies_the_adapter_unless_a_clone_shares_it() -> None
     )
     assert [d.channels[0].hw_id for d in devices] == [None, None, "206C3EA1"]
     assert len({d.key for d in devices}) == 3
+
+
+def test_pcan_darwin_configs_are_one_device_per_channel() -> None:
+    """MacCAN's PCBUSB reports no device_id, so each channel is its own adapter."""
+    devs = enrich(
+        "pcan",
+        [
+            {"interface": "pcan", "channel": "PCAN_USBBUS1", "supports_fd": False},
+            {"interface": "pcan", "channel": "PCAN_USBBUS2", "supports_fd": True},
+        ],
+    )
+    assert [[c.channel for c in d.channels] for d in devs] == [["PCAN_USBBUS1"], ["PCAN_USBBUS2"]]
+    assert devs[1].capabilities == ("CAN 2.0", "CAN FD")
+    assert all(d.status == "available" for d in devs)
+    assert len({d.key for d in devs}) == 2
