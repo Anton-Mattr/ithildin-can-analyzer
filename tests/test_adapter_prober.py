@@ -31,6 +31,7 @@ from ithildin.ui.adapter_prober import (
     AdapterChoice,
     AdapterProber,
     register_prober,
+    supported_backends,
 )
 
 
@@ -38,6 +39,12 @@ from ithildin.ui.adapter_prober import (
 def _dev_mode(monkeypatch):  # type: ignore[no-untyped-def]
     """Most tests assert the loopback is emitted, which is dev-mode only."""
     monkeypatch.setenv("ITHILDIN_DEV", "1")
+
+
+@pytest.fixture(autouse=True)
+def _windows_backend_set(monkeypatch):  # type: ignore[no-untyped-def]
+    """The run() tests stub kvaser & co., which macOS doesn't probe."""
+    monkeypatch.setattr(prober_mod, "supported_backends", lambda: prober_mod._SUPPORTED_BACKENDS)
 
 
 def _has_virtual(rows: list) -> bool:
@@ -364,12 +371,27 @@ def test_detect_gs_usb_reads_each_serial_and_lets_go_of_the_adapter(monkeypatch)
     assert [a.open for a in adapters] == [False, False]
 
 
-def test_gs_usb_is_scanned_on_windows_only(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.parametrize(
+    ("platform", "scans"), [("win32", True), ("darwin", True), ("linux", False)]
+)
+def test_gs_usb_is_scanned_on_windows_and_macos_only(  # type: ignore[no-untyped-def]
+    monkeypatch, platform: str, scans: bool
+) -> None:
     """On Linux the kernel driver owns the adapter and it shows up as SocketCAN."""
     scanned: list[bool] = []
     monkeypatch.setattr(prober_mod, "_detect_gs_usb", lambda: scanned.append(True) or [])
+    monkeypatch.setattr(sys, "platform", platform)
     assert prober_mod._detect_configs("gs_usb") == []
-    assert scanned == ([True] if sys.platform == "win32" else [])
+    assert scanned == ([True] if scans else [])
+
+
+def test_supported_backends_on_macos_is_pcan_and_gs_usb() -> None:
+    assert supported_backends("darwin") == ("pcan", "gs_usb")
+
+
+def test_supported_backends_elsewhere_unchanged() -> None:
+    assert supported_backends("win32") == prober_mod._SUPPORTED_BACKENDS
+    assert supported_backends("linux") == prober_mod._SUPPORTED_BACKENDS
 
 
 def test_adapter_choice_back_compat_equality() -> None:

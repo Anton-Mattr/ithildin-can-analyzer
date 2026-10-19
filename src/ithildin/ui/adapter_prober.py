@@ -53,6 +53,10 @@ _SUPPORTED_BACKENDS: tuple[str, ...] = (
 """Backends the prober actively probes. Kept narrow so we don't import
 vendor modules we don't intend to support."""
 
+_MACOS_BACKENDS: tuple[str, ...] = ("pcan", "gs_usb")
+"""macOS has drivers for none of the others: PEAK goes through the MacCAN
+PCBUSB library and candleLight adapters through libusb."""
+
 BACKEND_TIMEOUT_S = 3.0
 """Hard ceiling per backend probe. A vendor import or detection hung past
 this is reported via ``backend_failed`` and the worker thread carries on;
@@ -90,6 +94,10 @@ VIRTUAL_LOOPBACK = AdapterChoice(
 )
 """No-hardware loopback adapter. Surfaced only in dev mode (see
 :func:`dev_mode`); appended last in every probe when it is on."""
+
+
+def supported_backends(platform: str = sys.platform) -> tuple[str, ...]:
+    return _MACOS_BACKENDS if platform == "darwin" else _SUPPORTED_BACKENDS
 
 
 def dev_mode() -> bool:
@@ -166,7 +174,7 @@ class AdapterProber(QObject):
     @Slot()
     def run(self) -> None:
         seen: set[tuple[str, str | None, str | int]] = set()
-        for backend in _SUPPORTED_BACKENDS:
+        for backend in supported_backends():
             if self._cancelled:
                 break
             if backend in self._skip_backends:
@@ -302,7 +310,7 @@ def _detect_configs(backend: str) -> list[dict[str, object]]:
     if backend == "gs_usb":
         # On Linux the kernel's gs_usb driver owns the adapter, which shows
         # up as SocketCAN; pyusb would detach it.
-        return _detect_gs_usb() if sys.platform == "win32" else []
+        return _detect_gs_usb() if sys.platform in ("win32", "darwin") else []
 
     from ithildin.core.bus import KVASER_ENUM_LOCK, detect_configs, kvaser_enum_hardware
 
