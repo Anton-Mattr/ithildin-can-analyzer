@@ -487,3 +487,27 @@ def test_dialog_skips_hung_backends_and_shares_new_ones(qapp, qtbot, monkeypatch
         assert hung == {"pcan", "kvaser"}
     finally:
         release.set()
+
+
+def test_missing_pcbusb_on_macos_points_to_install(qapp, qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(prober_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(prober_mod.ctypes.util, "find_library", lambda name: None)
+    dlg = _make_dialog(qtbot)
+    assert dlg._driver_hint.isVisible()
+    assert "mac-can.com" in dlg._driver_hint.text()
+
+
+def test_driver_hint_hidden_when_pcbusb_present(qapp, qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(prober_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        prober_mod.ctypes.util, "find_library", lambda name: "/usr/local/lib/libPCBUSB.dylib"
+    )
+    dlg = _make_dialog(qtbot)
+    assert not dlg._driver_hint.isVisible()
+
+
+def test_driver_hint_hidden_off_macos(qapp, qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(prober_mod.sys, "platform", "win32")
+    monkeypatch.setattr(prober_mod.ctypes.util, "find_library", lambda name: None)
+    dlg = _make_dialog(qtbot)
+    assert not dlg._driver_hint.isVisible()

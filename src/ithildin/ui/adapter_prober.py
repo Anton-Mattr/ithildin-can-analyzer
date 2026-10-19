@@ -29,6 +29,7 @@ wedge the dock indefinitely.
 from __future__ import annotations
 
 import contextlib
+import ctypes.util
 import logging
 import os
 import sys
@@ -98,6 +99,16 @@ VIRTUAL_LOOPBACK = AdapterChoice(
 
 def supported_backends(platform: str = sys.platform) -> tuple[str, ...]:
     return _MACOS_BACKENDS if platform == "darwin" else _SUPPORTED_BACKENDS
+
+
+def missing_driver_hint() -> str | None:
+    """Rich-text install pointer when a probed backend's driver is absent."""
+    if sys.platform == "darwin" and ctypes.util.find_library("PCBUSB") is None:
+        return (
+            "PEAK adapters need the MacCAN PCBUSB library — install it from "
+            '<a href="https://www.mac-can.com">mac-can.com</a>, then ↻ Rescan.'
+        )
+    return None
 
 
 def dev_mode() -> bool:

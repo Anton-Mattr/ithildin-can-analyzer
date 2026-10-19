@@ -45,6 +45,7 @@ from ithildin.ui.adapter_enrich import ChannelInfo, DeviceInfo
 from ithildin.ui.adapter_prober import (
     AdapterProber,
     dev_mode,
+    missing_driver_hint,
     register_prober,
     virtual_device,
 )
@@ -284,6 +285,16 @@ class CreateCanBusDialog(QDialog):
         self._empty_hint.setWordWrap(True)
         self._empty_hint.setVisible(False)
         layout.addWidget(self._empty_hint)
+
+        hint = missing_driver_hint()
+        self._driver_hint = QLabel(hint or "", self)
+        self._driver_hint.setObjectName("DeviceInfoStrip")
+        self._driver_hint.setFont(tabular_font(8))
+        self._driver_hint.setWordWrap(True)
+        self._driver_hint.setTextFormat(Qt.TextFormat.RichText)
+        self._driver_hint.setOpenExternalLinks(True)
+        self._driver_hint.setVisible(hint is not None)
+        layout.addWidget(self._driver_hint)
 
         # Channels
         self._channel_label = self._field_label("Channel")
