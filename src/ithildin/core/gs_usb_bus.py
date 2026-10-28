@@ -14,6 +14,7 @@ bundled libusb are vendor work the GUI thread must not do.
 from __future__ import annotations
 
 import contextlib
+import sys
 import threading
 import time
 
@@ -94,6 +95,7 @@ class GsUsbBus(can.interfaces.gs_usb.GsUsbBus):
         self._flags = GS_CAN_MODE_HW_TIMESTAMP | (
             GS_CAN_MODE_LISTEN_ONLY if listen_only else GS_CAN_MODE_NORMAL
         )
+        _no_usb_reset_on_macos(dev)
         dev.set_timing(**self._timing)
         dev.start(self._flags)
         self.gs_usb = dev
@@ -175,11 +177,23 @@ class GsUsbBus(can.interfaces.gs_usb.GsUsbBus):
             dev = GsUsb.find(bus=self.gs_usb.bus, address=self.gs_usb.address)
             if dev is not None:
                 try:
+                    _no_usb_reset_on_macos(dev)
                     dev.set_timing(**self._timing)
                     dev.start(self._flags)
                     dev.stop()
                 finally:
                     usb.util.dispose_resources(dev.gs_usb)
+
+
+def _no_usb_reset_on_macos(dev: GsUsb) -> None:
+    """Make ``dev.start()`` skip its USB reset on macOS.
+
+    After that reset macOS libusb reports a kernel driver on the adapter's
+    interface, and the detach ``start()`` then attempts needs root, so
+    without it a normal user can't open the adapter.
+    """
+    if sys.platform == "darwin":
+        dev.gs_usb.reset = lambda: None
 
 
 SERIAL_READ_ERRORS = (usb.core.USBError, ValueError, NotImplementedError)

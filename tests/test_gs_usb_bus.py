@@ -44,6 +44,7 @@ class FakeAdapter:
     * ``calls``: ``(name, args)`` per set_timing / start / stop and per
       ``usb.util.dispose_resources`` of its pyusb device (``gs_usb``, the
       fake itself), in order.
+    * ``resets``: USB resets, which gs_usb's ``start()`` does first.
     * ``sent``: the CAN ID of every frame written to the adapter.
     * ``serial``: its USB serial; ``held`` makes reading it fail as WinUSB
       does while another handle has the adapter open.
@@ -65,6 +66,10 @@ class FakeAdapter:
         self.device_flags = 0
         self.reads = 0
         self.probes = 0
+        self.resets = 0
+
+    def reset(self) -> None:
+        self.resets += 1
 
     @property
     def device_capability(self) -> SimpleNamespace:
@@ -91,6 +96,7 @@ class FakeAdapter:
         self.calls.append(("set_timing", (prop_seg, phase_seg1, phase_seg2, sjw, brp)))
 
     def start(self, flags: int) -> None:
+        self.gs_usb.reset()
         self.device_flags = flags & self.feature
         self.calls.append(("start", flags))
 
@@ -347,6 +353,19 @@ def test_shutdown_after_unplug_leaves_other_adapters_alone(adapters, make_bus) -
 
     bus.shutdown()
     assert adapters[1].calls == []
+
+
+@pytest.mark.parametrize(("platform", "resets"), [("darwin", 0), ("win32", 3)])
+def test_adapter_is_never_usb_reset_on_macos(  # type: ignore[no-untyped-def]
+    adapters, monkeypatch, platform: str, resets: int
+) -> None:
+    """After the reset macOS libusb reports a kernel driver on the adapter,
+    and the detach gs_usb's start() then attempts needs root."""
+    monkeypatch.setattr(gs_usb_bus.sys, "platform", platform)
+    bus = GsUsbBus(channel=0, bitrate=500_000)
+    bus.flush_tx_buffer()
+    bus.shutdown()
+    assert adapters[0].resets == resets
 
 
 # ---- Opening by serial ----
