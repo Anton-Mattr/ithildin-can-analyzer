@@ -298,11 +298,12 @@ def test_listen_only_shutdown_never_leaves_listen_only(adapters, make_bus) -> No
     bus.shutdown()
     # Opened, then started and stopped once more after closing.
     assert adapters[0].starts() == [_LISTEN_ONLY, _LISTEN_ONLY]
-    assert adapters[0].calls[-1] == ("stop", None)
+    assert adapters[0].calls[-2:] == [("stop", None), ("dispose", None)]
 
 
 def test_shutdown_releases_its_handle_before_rearming(adapters, make_bus) -> None:  # type: ignore[no-untyped-def]
-    """WinUSB refuses the re-arm's fresh handle while the bus's own is open."""
+    """WinUSB refuses the re-arm's fresh handle while the bus's own is open,
+    and on macOS a few leaked handles leave every later read access-denied."""
     bus = make_bus()
     timing, start = adapters[0].calls
 
@@ -313,7 +314,19 @@ def test_shutdown_releases_its_handle_before_rearming(adapters, make_bus) -> Non
         timing,
         start,
         ("stop", None),
+        ("dispose", None),
     ]
+
+
+def test_shutdown_releases_the_rearm_handle_when_the_rearm_fails(adapters, make_bus) -> None:  # type: ignore[no-untyped-def]
+    bus = make_bus()
+
+    def refused(flags: int) -> None:
+        raise usb.core.USBError("Access denied (insufficient permissions)", -3, 13)
+
+    adapters[0].start = refused  # type: ignore[method-assign]
+    bus.shutdown()
+    assert adapters[0].calls[-1] == ("dispose", None)
 
 
 def test_send_after_shutdown_never_reaches_the_adapter(adapters, make_bus) -> None:  # type: ignore[no-untyped-def]

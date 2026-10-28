@@ -169,12 +169,17 @@ class GsUsbBus(can.interfaces.gs_usb.GsUsbBus):
         # fresh handle, or opening it again fails (python-can #1790). In this
         # bus's own mode, so a listen-only bus never ACKs, and found by USB
         # address, so after an unplug no other adapter is touched.
+        # That handle is released too: on macOS a few leaked handles leave
+        # every later read failing with access denied, which reads as silence.
         with contextlib.suppress(usb.core.USBError):
             dev = GsUsb.find(bus=self.gs_usb.bus, address=self.gs_usb.address)
             if dev is not None:
-                dev.set_timing(**self._timing)
-                dev.start(self._flags)
-                dev.stop()
+                try:
+                    dev.set_timing(**self._timing)
+                    dev.start(self._flags)
+                    dev.stop()
+                finally:
+                    usb.util.dispose_resources(dev.gs_usb)
 
 
 SERIAL_READ_ERRORS = (usb.core.USBError, ValueError, NotImplementedError)
