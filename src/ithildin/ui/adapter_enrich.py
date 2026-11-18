@@ -36,7 +36,9 @@ from ithildin.workspace.schema import (
     PCAN_DEFAULT_DEVICE_IDS,
     SupportedInterface,
     channel_key,
+    gs_usb_channel,
     hw_id_of,
+    parse_gs_usb_channel,
 )
 
 ChannelStatus = Literal["free", "in-use", "offline"]
@@ -300,26 +302,35 @@ def _enrich_pcan(backend: str, configs: list[dict[str, object]]) -> list[DeviceI
 
 
 def _enrich_gs_usb(backend: str, configs: list[dict[str, object]]) -> list[DeviceInfo]:
-    """One single-channel device per adapter.
+    """One device per adapter, with a channel per CAN channel it has.
 
-    The scan reads only the USB serial, so there is no product name; the
-    index in the model keeps two adapters apart, clones sharing a serial too.
+    The scan reads only the USB serial and the channel count, so there is
+    no product name; the index in the model keeps two adapters apart, clones
+    sharing a serial too.
     """
-    out: list[DeviceInfo] = []
+    channels: OrderedDict[int, list[ChannelInfo]] = OrderedDict()
     for cfg in configs:
-        channel = cfg.get("channel")
-        if not isinstance(channel, int):
+        try:
+            index, device_channel = parse_gs_usb_channel(cfg.get("channel"))
+        except ValueError:
             continue
-        out.append(
-            DeviceInfo(
-                interface="gs_usb",
-                vendor="candleLight",
-                model=f"gs_usb adapter #{channel}",
-                transport="USB",
-                channels=(ChannelInfo(channel=channel, label="ch0", hw_id=hw_id_of(backend, cfg)),),
+        channels.setdefault(index, []).append(
+            ChannelInfo(
+                channel=gs_usb_channel(index, device_channel),
+                label=f"ch{device_channel}",
+                hw_id=hw_id_of(backend, cfg),
             )
         )
-    return out
+    return [
+        DeviceInfo(
+            interface="gs_usb",
+            vendor="candleLight",
+            model=f"gs_usb adapter #{index}",
+            transport="USB",
+            channels=tuple(chans),
+        )
+        for index, chans in channels.items()
+    ]
 
 
 def _pcan_status(condition: object) -> ChannelStatus:

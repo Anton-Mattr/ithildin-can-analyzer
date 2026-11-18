@@ -40,7 +40,7 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
 from ithildin.ui.adapter_enrich import ChannelInfo, DeviceInfo, enrich
-from ithildin.workspace.schema import SupportedInterface
+from ithildin.workspace.schema import SupportedInterface, gs_usb_channel
 
 _log = logging.getLogger(__name__)
 
@@ -340,19 +340,28 @@ def _detect_configs(backend: str) -> list[dict[str, object]]:
 
 
 def _detect_gs_usb() -> list[dict[str, object]]:
-    """One config per connected gs_usb adapter: its ``GsUsb.scan()`` index and USB serial.
+    """One config per CAN channel of each connected gs_usb adapter.
 
-    The index follows plug order, so ``GsUsbBus`` opens a pinned bus by the
-    serial. Reading it opens the device, which WinUSB grants to one handle
-    at a time: the reads hold ``GS_USB_LOCK`` so no bus opens meanwhile, the
-    handle is released at once, and an adapter a bus holds open reports no
-    serial.
+    Its ``channel`` is the ``GsUsb.scan()`` index, ``"<index>:<n>"`` for
+    channel ``n`` > 0 of a multi-channel adapter (``schema.gs_usb_channel``),
+    and its ``serial`` the adapter's USB serial. The index follows plug
+    order, so ``GsUsbBus`` opens a pinned bus by the serial. Reading it and
+    the channel count opens the device, which WinUSB grants to one handle at
+    a time: the reads hold ``GS_USB_LOCK`` so no bus opens meanwhile, the
+    handle is released at once, an adapter a bus of this process holds is
+    described from its open instead (``gs_usb_bus.held_adapter``), and one
+    another program holds reports no serial and one channel.
     """
     import libusb_package
     import usb.util
     from gs_usb.gs_usb import GsUsb
 
-    from ithildin.core.gs_usb_bus import GS_USB_LOCK, SERIAL_READ_ERRORS
+    from ithildin.core.gs_usb_bus import (
+        GS_USB_LOCK,
+        SERIAL_READ_ERRORS,
+        channel_count,
+        held_adapter,
+    )
 
     libusb_package.get_libusb1_backend()
     if not GS_USB_LOCK.acquire(timeout=_PROBE_LOCK_WAIT_S):
@@ -360,11 +369,19 @@ def _detect_gs_usb() -> list[dict[str, object]]:
     try:
         configs: list[dict[str, object]] = []
         for index, dev in enumerate(GsUsb.scan()):
-            serial: str | None = None
-            with contextlib.suppress(*SERIAL_READ_ERRORS):
-                serial = dev.serial_number
-            usb.util.dispose_resources(dev.gs_usb)
-            configs.append({"interface": "gs_usb", "channel": index, "serial": serial})
+            held = held_adapter(dev)
+            if held is not None:
+                serial, count = held
+            else:
+                serial = None
+                with contextlib.suppress(*SERIAL_READ_ERRORS):
+                    serial = dev.serial_number
+                count = channel_count(dev)
+                usb.util.dispose_resources(dev.gs_usb)
+            configs.extend(
+                {"interface": "gs_usb", "channel": gs_usb_channel(index, n), "serial": serial}
+                for n in range(count)
+            )
     finally:
         GS_USB_LOCK.release()
     return configs

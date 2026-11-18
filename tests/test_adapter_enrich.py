@@ -188,6 +188,22 @@ def test_gs_usb_one_device_per_adapter() -> None:
     assert all(d.status is None and d.capabilities is None for d in devices)
 
 
+def test_gs_usb_multi_channel_adapter_is_one_device_with_a_pill_per_channel() -> None:
+    devices = enrich(
+        "gs_usb",
+        [
+            {"interface": "gs_usb", "channel": 0, "serial": "CCU0001"},
+            {"interface": "gs_usb", "channel": "0:1", "serial": "CCU0001"},
+            {"interface": "gs_usb", "channel": 1, "serial": "206C3EA1"},
+        ],
+    )
+    assert [d.model for d in devices] == ["gs_usb adapter #0", "gs_usb adapter #1"]
+    assert [[(c.channel, c.label, c.hw_id) for c in d.channels] for d in devices] == [
+        [(0, "ch0", "CCU0001"), ("0:1", "ch1", "CCU0001:1")],
+        [(1, "ch0", "206C3EA1")],
+    ]
+
+
 # ---- Adapter identity ----
 
 

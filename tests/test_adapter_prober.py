@@ -327,42 +327,98 @@ def test_gs_usb_probe_reports_the_driver_busy_while_a_bus_opens(monkeypatch) -> 
 
 
 class _ScannedGsUsb:
-    """A scanned gs_usb adapter whose serial read opens the device, as
-    pyusb's does; ``held`` makes it fail like WinUSB with the adapter open
-    elsewhere."""
+    """A scanned gs_usb adapter whose serial and DEVICE_CONFIG reads open the
+    device, as pyusb's do; ``held`` makes them fail like WinUSB with the
+    adapter open elsewhere."""
 
-    def __init__(self, serial: str, *, held: bool = False) -> None:
+    def __init__(
+        self, serial: str, *, held: bool = False, channels: int = 1, address: int = 0
+    ) -> None:
         self._serial = serial
         self.held = held
+        self.channels = channels
+        self.bus = 1
+        self.address = address or id(self) % 1000 + 100
         self.gs_usb = self
         self.open = False
+        self.touched = False
 
-    @property
-    def serial_number(self) -> str:
+    def _claim(self) -> None:
         import usb.core
 
+        self.touched = True
         if self.held:
             raise usb.core.USBError("Access denied (insufficient permissions)", -3, 13)
         self.open = True
+
+    @property
+    def serial_number(self) -> str:
+        self._claim()
         return self._serial
 
+    def ctrl_transfer(
+        self, request_type: int, request: int, value: int, index: int, data: object = None
+    ) -> bytes:
+        import struct
 
-def test_detect_gs_usb_reads_each_serial_and_lets_go_of_the_adapter(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """One config per scanned adapter, by index, with its serial; an adapter a
-    bus holds open has none. Every handle the reads opened is released."""
+        self._claim()
+        assert request == 5, "only DEVICE_CONFIG is read while probing"
+        return struct.pack("<4B2I", 0, 0, 0, self.channels - 1, 2, 1)
+
+
+def _scan(monkeypatch: pytest.MonkeyPatch, adapters: list[_ScannedGsUsb]) -> None:
     import libusb_package
     import usb.util
     from gs_usb.gs_usb import GsUsb
 
-    adapters = [_ScannedGsUsb("206C3EA1"), _ScannedGsUsb("0045003C", held=True)]
     monkeypatch.setattr(libusb_package, "get_libusb1_backend", lambda: None)
     monkeypatch.setattr(GsUsb, "scan", staticmethod(lambda: adapters))
     monkeypatch.setattr(usb.util, "dispose_resources", lambda dev: setattr(dev, "open", False))
+
+
+def test_detect_gs_usb_reads_each_serial_and_lets_go_of_the_adapter(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """One config per scanned adapter, by index, with its serial; an adapter
+    another program holds open has none. Every handle the reads opened is
+    released."""
+    adapters = [_ScannedGsUsb("206C3EA1"), _ScannedGsUsb("0045003C", held=True)]
+    _scan(monkeypatch, adapters)
     assert prober_mod._detect_gs_usb() == [
         {"interface": "gs_usb", "channel": 0, "serial": "206C3EA1"},
         {"interface": "gs_usb", "channel": 1, "serial": None},
     ]
     assert [a.open for a in adapters] == [False, False]
+
+
+def test_detect_gs_usb_lists_every_channel_of_a_multi_channel_adapter(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A KRAKA CCU reports two channels (icount 1): ch0 BMS bus, ch1 charger bus."""
+    adapters = [_ScannedGsUsb("CCU0001", channels=2), _ScannedGsUsb("206C3EA1")]
+    _scan(monkeypatch, adapters)
+    assert prober_mod._detect_gs_usb() == [
+        {"interface": "gs_usb", "channel": 0, "serial": "CCU0001"},
+        {"interface": "gs_usb", "channel": "0:1", "serial": "CCU0001"},
+        {"interface": "gs_usb", "channel": 1, "serial": "206C3EA1"},
+    ]
+    assert [a.open for a in adapters] == [False, False]
+
+
+def test_detect_gs_usb_describes_a_held_adapter_without_touching_it(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """With one channel open, the other must still be offered: the adapter a
+    bus of this process holds is described from its open, never through a
+    second handle (WinUSB refuses one) nor released."""
+    from types import SimpleNamespace
+
+    from ithildin.core import gs_usb_bus
+
+    ccu = _ScannedGsUsb("CCU0001", held=True, channels=2, address=7)
+    _scan(monkeypatch, [ccu])
+    monkeypatch.setitem(
+        gs_usb_bus._ADAPTERS, (1, 7), SimpleNamespace(serial="CCU0001", channel_count=2)
+    )
+    assert prober_mod._detect_gs_usb() == [
+        {"interface": "gs_usb", "channel": 0, "serial": "CCU0001"},
+        {"interface": "gs_usb", "channel": "0:1", "serial": "CCU0001"},
+    ]
+    assert not ccu.touched
 
 
 @pytest.mark.parametrize(

@@ -511,3 +511,33 @@ def test_driver_hint_hidden_off_macos(qapp, qtbot, monkeypatch) -> None:  # type
     monkeypatch.setattr(prober_mod.ctypes.util, "find_library", lambda name: None)
     dlg = _make_dialog(qtbot)
     assert not dlg._driver_hint.isVisible()
+
+
+def _ccu_device() -> DeviceInfo:
+    """A two-channel gs_usb adapter as the prober and enricher present it."""
+    from ithildin.ui.adapter_enrich import enrich
+
+    (device,) = enrich(
+        "gs_usb",
+        [
+            {"interface": "gs_usb", "channel": 0, "serial": "CCU0001"},
+            {"interface": "gs_usb", "channel": "0:1", "serial": "CCU0001"},
+        ],
+    )
+    return device
+
+
+def test_second_gs_usb_channel_is_offered_while_the_first_is_declared(qapp, qtbot) -> None:  # type: ignore[no-untyped-def]
+    """With the BMS bus (ch0) declared, ch1 is the free pill and Create
+    declares the charger bus on it, pinned to that channel of the adapter."""
+    dlg = _make_dialog(qtbot, existing_buses=[("gs_usb", 0, "CCU0001")])
+    _select_new_device(dlg, _ccu_device())
+    assert dlg._channel_box.isVisibleTo(dlg)
+    assert dlg._channel is not None and dlg._channel.label == "ch1"
+    dlg._name_edit.setText("Charger")
+    captured: list[BusConfig] = []
+    dlg.bus_declared.connect(lambda cfg, _dbcs: captured.append(cfg))
+
+    dlg._on_create()
+
+    assert (captured[0].channel, captured[0].hw_id) == ("0:1", "CCU0001:1")
