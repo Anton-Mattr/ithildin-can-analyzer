@@ -63,6 +63,10 @@ class BusConfig(BaseModel):
     name: str
     interface: SupportedInterface
     channel: str | int
+    """The channel on ``interface``. gs_usb: the adapter's scan index for its
+    first CAN channel, ``"<index>:<n>"`` for channel ``n`` of a multi-channel
+    adapter (:func:`gs_usb_channel`); a project saved before multi-channel
+    support has only indexes, which are channel 0."""
     bitrate: int = Field(gt=0)
     fd: bool = False
     listen_only: bool = False
@@ -104,6 +108,14 @@ class BusConfig(BaseModel):
         if isinstance(data, dict) and data.get("interface") == "cantact":
             channel = str(data.get("channel", 0)).removeprefix("ch:")
             data = {**data, "interface": "gs_usb", "channel": int(channel)}
+        # One spelling per gs_usb channel ("0", "0:0" and 0 are one), so the
+        # Workspace's unique-channel check sees them as the same channel.
+        if isinstance(data, dict) and data.get("interface") == "gs_usb":
+            try:
+                index, device_channel = parse_gs_usb_channel(data.get("channel", 0))
+            except ValueError:
+                return data  # refused with a clear error when the bus opens
+            data = {**data, "channel": gs_usb_channel(index, device_channel)}
         return data
 
     @model_validator(mode="after")
@@ -115,6 +127,45 @@ class BusConfig(BaseModel):
                 "bus or use a pcan/kvaser/gs_usb adapter."
             )
         return self
+
+
+def gs_usb_channel(index: int, device_channel: int) -> str | int:
+    """The ``BusConfig.channel`` of CAN channel ``device_channel`` of gs_usb adapter ``index``.
+
+    Channel 0 is the bare index, as every project saved before multi-channel
+    support has it, so a single-channel adapter's bus is unchanged.
+    """
+    return index if device_channel == 0 else f"{index}:{device_channel}"
+
+
+def parse_gs_usb_channel(channel: object) -> tuple[int, int]:
+    """``(adapter index, CAN channel on the adapter)`` of a gs_usb ``BusConfig.channel``.
+
+    Takes an index (``0``, ``"0"``) or ``"<index>:<n>"``; ``ValueError`` for
+    anything else.
+    """
+    if isinstance(channel, bool):
+        raise ValueError(f"not a gs_usb channel: {channel!r}")
+    if isinstance(channel, int):
+        index, device_channel = channel, 0
+    elif isinstance(channel, str):
+        head, sep, tail = channel.strip().partition(":")
+        if not head.isdigit() or (sep and not tail.isdigit()):
+            raise ValueError(f"not a gs_usb channel: {channel!r} (expected N or N:M)")
+        index, device_channel = int(head), int(tail) if sep else 0
+    else:
+        raise ValueError(f"not a gs_usb channel: {channel!r}")
+    if index < 0:
+        raise ValueError(f"not a gs_usb channel: {channel!r}")
+    return index, device_channel
+
+
+def gs_usb_serial_of(hw_id: str, device_channel: int) -> str:
+    """The USB serial in a gs_usb ``hw_id`` (:func:`hw_id_of`) for that CAN channel."""
+    suffix = f":{device_channel}"
+    if device_channel and hw_id.endswith(suffix):
+        return hw_id[: -len(suffix)]
+    return hw_id
 
 
 PCAN_DEFAULT_DEVICE_IDS = (0xFF, 0xFFFFFFFF)
@@ -129,7 +180,9 @@ def hw_id_of(interface: str, detected: Mapping[str, object]) -> str | None:
     and the controller number, ``"{device_id:08x}.{controller}"``; kvaser:
     the card serial and channel on the card, ``"{serial}.{dongle_channel}"``;
     ixxat: the unique hardware id, which names the device, not the channel;
-    gs_usb: the USB serial.
+    gs_usb: the USB serial, ``"{serial}:{n}"`` for CAN channel ``n`` > 0 of
+    a multi-channel adapter (so a pin made before multi-channel support,
+    the bare serial, still means channel 0).
     """
     if interface == "pcan":
         device_id = detected.get("device_id")
@@ -148,6 +201,12 @@ def hw_id_of(interface: str, detected: Mapping[str, object]) -> str | None:
         value = detected.get("unique_hardware_id")
     elif interface == "gs_usb":
         value = detected.get("serial")
+        try:
+            _, device_channel = parse_gs_usb_channel(detected.get("channel", 0))
+        except ValueError:
+            return None
+        if isinstance(value, str) and value and device_channel:
+            return f"{value}:{device_channel}"
     else:
         return None
     return value if isinstance(value, str) and value else None
