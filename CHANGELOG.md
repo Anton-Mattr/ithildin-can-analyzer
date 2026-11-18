@@ -13,6 +13,13 @@ once it reaches 1.0.
   The adapter probe looks for PEAK adapters through the MacCAN PCBUSB
   library and for CANable / candleLight (`gs_usb`) adapters through the
   bundled libusb, and opens a `gs_usb` adapter without root.
+- Multi-channel `gs_usb` devices: every CAN channel is listed (one channel
+  pill each in the Create CAN bus dialog) and is its own bus, and the
+  channels of one device can be open at once, each closing on its own.
+  Channel 0 is saved as before (the adapter index); channel *n* is saved as
+  `"<index>:<n>"`, and its adapter pin as `<serial>:<n>`. A channel start
+  the device refuses (a stalled request) fails the bus open with a message
+  that says so, instead of a USB error.
 
 ### Fixed
 

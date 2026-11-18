@@ -161,6 +161,17 @@ the one matching your adapter:
   with Ithildin. On Linux the kernel's `gs_usb` driver exposes the adapter
   as SocketCAN (`can0`), so use the `socketcan` backend there. Adapters
   running slcan firmware are not supported.
+- **Multi-channel `gs_usb` devices** — each CAN channel is its own bus: the
+  Create CAN bus dialog shows one pill per channel (`ch0`, `ch1`, …) under
+  the device, and the buses on one device can be open at the same time
+  (they share the one USB claim; closing one leaves the others running).
+  In the project file channel 0 stays the adapter index (`channel = 0`)
+  and channel *n* is `channel = "0:n"`; projects saved before this load as
+  channel 0. If the device refuses to start a channel in the mode asked
+  for (it stalls the request — some devices allow a channel listen-only
+  only), the bus fails to open with that reason; open it listen-only. On
+  Linux each channel is its own SocketCAN interface (`can0`, `can1`);
+  set listen-only there with `ip link set canN type can … listen-only on`.
 
 On **macOS** only two adapter families are supported:
 
@@ -169,8 +180,8 @@ On **macOS** only two adapter families are supported:
   `/usr/local/lib`). Without it the adapter probe reports no PEAK
   devices.
 - **candleLight / gs_usb** (CANable, candleLight and other gs_usb
-  firmware) — no install needed; the app bundles libusb, and no root is
-  needed.
+  firmware, single- or multi-channel) — no install needed; the app bundles
+  libusb, and no root is needed.
 
 The built-in `virtual` backend works with no driver and is handy for
 trying the UI without hardware.
