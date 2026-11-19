@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import csv
 import math
 import uuid
 from pathlib import Path
@@ -12,9 +13,11 @@ import can
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QFileDialog
 
 from ithildin.app_state.project import Project
 from ithildin.core.types import FrameRecord
+from ithildin.ui import export_prefs
 from ithildin.ui.signal_plot import (
     SignalPlotWindow,
     _maxlen_for_window,
@@ -325,11 +328,14 @@ def test_apply_window_seconds_resizes_curve_deques(  # type: ignore[no-untyped-d
     win.add_signal("EngineCommand.EngineSpeed")
     curve = win._curves["EngineCommand.EngineSpeed"]
     assert curve.times.maxlen == _maxlen_for_window(12.0)
+    # The plot draws as many samples as the curves hold, not the session.
+    assert win._plot._segment_limit == _maxlen_for_window(12.0)
 
     win._apply_window_seconds(60.0, mark_user=True)
     assert win._window_seconds == 60.0
     assert curve.times.maxlen == _maxlen_for_window(60.0)
     assert curve.values.maxlen == _maxlen_for_window(60.0)
+    assert win._plot._segment_limit == _maxlen_for_window(60.0)
 
 
 def test_save_restore_round_trips_window_seconds(  # type: ignore[no-untyped-def]
@@ -498,6 +504,7 @@ def test_save_and_restore_curve_colors(qapp, qtbot, tmp_path: Path) -> None:  # 
 # ---- Continuity across bus stop, failure and reconnect ----
 
 _SPEED = "EngineCommand.EngineSpeed"
+_IDLE = "EngineCommand.IdleSetpoint"
 
 
 def _send_speeds(channel: str, *raws: int) -> None:
@@ -600,15 +607,20 @@ def test_new_session_clears_plot(  # type: ignore[no-untyped-def]
         assert len(curve.values) == 0
 
 
-def _engine_frame(raw: int, *, is_error_frame: bool = False) -> FrameRecord:
+def _engine_frame(raw: int, *, t: float = 1.0, is_error_frame: bool = False) -> FrameRecord:
     payload = raw.to_bytes(2, "little") + (700).to_bytes(2, "little") + bytes(4)
     return FrameRecord(
         bus_name="CAN_1",
-        timestamp=1.0,
+        timestamp=t,
         arbitration_id=0x100,
         data=payload,
         is_error_frame=is_error_frame,
     )
+
+
+def _body_frame(raw_speed: int, *, t: float) -> FrameRecord:
+    payload = raw_speed.to_bytes(2, "little") + bytes([1, 0])
+    return FrameRecord(bus_name="CAN_1", timestamp=t, arbitration_id=0x200, data=payload)
 
 
 def test_error_frame_with_a_dbc_id_is_not_plotted(  # type: ignore[no-untyped-def]
@@ -630,3 +642,242 @@ def test_error_frame_with_a_dbc_id_is_not_plotted(  # type: ignore[no-untyped-de
 
     win._on_frames_received([_engine_frame(6400)])
     assert list(curve.values) == [800.0]
+
+
+def _paused_capable_plot(qtbot, tmp_path: Path, dbc: Path):  # type: ignore[no-untyped-def]
+    ctx = make_app_context(tmp_path)
+    ctx.database.add_dbc(dbc, ["CAN_1"])
+    ctx.bus_reader._session_t0 = 0.0
+    win = SignalPlotWindow(instance_id="p1")
+    qtbot.addWidget(win)
+    win.bind(ctx)
+    return ctx, win
+
+
+# ---- Pause ----
+
+
+def _legend_values(win, monkeypatch) -> list[float | None]:  # type: ignore[no-untyped-def]
+    shown: list[float | None] = []
+    for sp in win._subplots:
+        monkeypatch.setattr(sp._curve_list, "update_live", lambda _path, v: shown.append(v))
+    return shown
+
+
+def test_pause_holds_the_picture_and_resume_shows_what_arrived(  # type: ignore[no-untyped-def]
+    qapp, qtbot, tmp_path: Path, example_dbc_path: Path, monkeypatch
+) -> None:
+    _ctx, win = _paused_capable_plot(qtbot, tmp_path, example_dbc_path)
+    win.add_signal(_SPEED)
+    curve = win._curves[_SPEED]
+    drawn = win._plot._curves[_SPEED]
+    legend = _legend_values(win, monkeypatch)
+    win._on_frames_received([_engine_frame(6400, t=1.0), _engine_frame(7200, t=2.0)])
+    y_range = (drawn.y_min, drawn.y_max)
+
+    win._paused_btn.click()
+    win._on_frames_received([_engine_frame(8000, t=3.0)])
+    # Selecting Paused again keeps the picture taken at the pause.
+    win._paused_btn.click()
+    win._on_frames_received([_engine_frame(8800, t=4.0)])
+
+    assert list(curve.values) == [800.0, 900.0, 1000.0, 1100.0]
+    assert drawn.segment_count == 1
+    assert win._plot._x_max == 2.0
+    assert (drawn.y_min, drawn.y_max) == y_range
+    win._refresh_legend_live()
+    assert legend == [900.0]
+
+    win._running_btn.click()
+
+    # No gap and no straight line across one: every sample is drawn.
+    assert drawn.segment_count == 3
+    assert win._plot._x_max == 4.0
+    assert drawn.y_max >= 1100.0
+    win._refresh_legend_live()
+    assert legend == [900.0, 1100.0]
+
+
+def test_paused_plot_keeps_its_samples_when_the_ring_rolls_past_them(  # type: ignore[no-untyped-def]
+    qapp, qtbot, tmp_path: Path, example_dbc_path: Path
+) -> None:
+    _ctx, win = _paused_capable_plot(qtbot, tmp_path, example_dbc_path)
+    win._apply_window_seconds(1.0, mark_user=True)
+    win.add_signal(_SPEED)
+    curve = win._curves[_SPEED]
+    win._on_frames_received([_engine_frame(6400, t=0.5), _engine_frame(7200, t=0.9)])
+
+    win._paused_btn.click()
+    paused_frames = [_engine_frame(8000, t=1.0 + i / 1000) for i in range(curve.times.maxlen or 0)]
+    win._on_frames_received(paused_frames)
+
+    assert curve.times[0] == 1.0
+    assert win._plot._curves[_SPEED].segment_count == 1
+    win._refresh_legend_live()
+    assert win._export_btn.isEnabled()
+    [column] = win._subplots[0].export_columns()
+    assert column.values == [800.0, 900.0]
+
+    win._running_btn.click()
+    assert win._plot._curves[_SPEED].segment_count == len(paused_frames) - 1
+
+
+def test_curves_added_or_moved_while_paused_keep_to_the_picture(  # type: ignore[no-untyped-def]
+    qapp, qtbot, tmp_path: Path, example_dbc_path: Path
+) -> None:
+    _ctx, win = _paused_capable_plot(qtbot, tmp_path, example_dbc_path)
+    win.add_signal(_SPEED)
+    win._on_frames_received([_engine_frame(6400, t=1.0), _engine_frame(7200, t=2.0)])
+    win._paused_btn.click()
+    win._on_frames_received([_engine_frame(8000, t=3.0)])
+
+    lower = win._add_subplot()
+    win._on_move_in(win._subplots[0], lower, [_SPEED])
+    lower.add_signal(_IDLE)
+    win._on_frames_received([_engine_frame(8800, t=4.0)])
+
+    assert lower._plot._curves[_SPEED].segment_count == 1
+    assert [c.values for c in lower.export_columns()] == [[800.0, 900.0], []]
+
+    win._running_btn.click()
+    assert lower._plot._curves[_SPEED].segment_count == 3
+    assert list(win._curves[_IDLE].values) == [700.0]
+
+
+def test_a_line_broken_while_paused_stays_broken(  # type: ignore[no-untyped-def]
+    qapp, qtbot, tmp_path: Path, example_dbc_path: Path
+) -> None:
+    ctx, win = _paused_capable_plot(qtbot, tmp_path, example_dbc_path)
+    win.add_signal(_SPEED)
+    win._on_frames_received([_engine_frame(6400, t=1.0), _engine_frame(7200, t=2.0)])
+    win._paused_btn.click()
+
+    ctx.bus_reader.bus_health_changed.emit("CAN_1", "errors", "no ACK")
+    win._on_frames_received([_engine_frame(8000, t=3.0), _engine_frame(8800, t=4.0)])
+    win._running_btn.click()
+
+    assert win._plot._curves[_SPEED].segment_count == 2
+
+
+# ---- CSV export ----
+
+
+def _read_csv(path: Path) -> list[list[str]]:
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        return list(csv.reader(fh))
+
+
+def test_export_needs_pause_and_samples(  # type: ignore[no-untyped-def]
+    qapp, qtbot, tmp_path: Path, example_dbc_path: Path
+) -> None:
+    ctx, win = _paused_capable_plot(qtbot, tmp_path, example_dbc_path)
+    win.add_signal(_SPEED)
+    btn = win._export_btn
+
+    win._paused_btn.click()
+    assert not btn.isEnabled()
+    win._running_btn.click()
+
+    win._on_frames_received([_engine_frame(6400, t=1.0)])
+    assert not btn.isEnabled()
+    assert "Pause" in btn.toolTip()
+
+    win._paused_btn.click()
+    assert btn.isEnabled()
+
+    win._on_visibility_toggled(_SPEED, False)
+    win._refresh_legend_live()
+    assert not btn.isEnabled()
+    win._on_visibility_toggled(_SPEED, True)
+    win._refresh_legend_live()
+    assert btn.isEnabled()
+
+    ctx.bus_reader.session_t0_changed.emit(None)
+    assert not btn.isEnabled()
+
+
+def test_export_writes_visible_curves_over_visible_window(  # type: ignore[no-untyped-def]
+    qapp, qtbot, tmp_path: Path, example_dbc_path: Path, monkeypatch
+) -> None:
+    ctx, win = _paused_capable_plot(qtbot, tmp_path, example_dbc_path)
+    export_prefs.save_csv_format("comma")
+    win.add_signal(_SPEED)
+    win.add_signal("EngineCommand.IdleSetpoint")
+    lower = win._add_subplot()
+    lower.add_signal("BodyStatus.VehicleSpeed")
+    lower.add_signal("BodyStatus.DoorOpen")
+    lower.add_signal(_SPEED)
+    lower._on_visibility_toggled("BodyStatus.DoorOpen", False)
+
+    win._on_frames_received([_engine_frame(6400, t=1.0)])
+    win._on_frames_received([_body_frame(2500, t=15.0)])
+    win._on_frames_received([_engine_frame(7200, t=20.0), _body_frame(5000, t=20.0)])
+    win._paused_btn.click()
+    # Frames arriving while paused are recorded, but the export holds what
+    # the paused plot shows.
+    win._on_frames_received([_engine_frame(8000, t=21.0)])
+
+    reports: list[tuple[str, str]] = []
+    ctx.events.report_requested.connect(lambda msg, kind: reports.append((msg, kind)))
+    out_dir = tmp_path / "exports"
+    out_dir.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", lambda *_a, **_k: (str(out_dir / "speeds"), "")
+    )
+    win._export_btn.click()
+
+    out = out_dir / "speeds.csv"
+    # The 12 s window ends at 20 s, so the sample at 1 s is left out.
+    assert _read_csv(out) == [
+        [
+            "time_s",
+            "EngineCommand.EngineSpeed [rpm]",
+            "EngineCommand.IdleSetpoint [rpm]",
+            "BodyStatus.VehicleSpeed [km/h]",
+        ],
+        ["15.000000", "", "", "25"],
+        ["20.000000", "900", "700", "50"],
+    ]
+    assert reports == [(f"Exported 2 rows × 3 signals to {out}", "info")]
+    assert export_prefs.last_export_dir() == out_dir
+
+    # Widening the window while paused widens the export with it.
+    win._apply_window_seconds(30.0, mark_user=True)
+    win._export_btn.click()
+    assert [row[0] for row in _read_csv(out)[1:]] == ["1.000000", "15.000000", "20.000000"]
+
+
+def test_cancelled_export_writes_nothing(  # type: ignore[no-untyped-def]
+    qapp, qtbot, tmp_path: Path, example_dbc_path: Path, monkeypatch
+) -> None:
+    ctx, win = _paused_capable_plot(qtbot, tmp_path, example_dbc_path)
+    win.add_signal(_SPEED)
+    win._on_frames_received([_engine_frame(6400, t=1.0)])
+    win._paused_btn.click()
+
+    reports: list[tuple[str, str]] = []
+    ctx.events.report_requested.connect(lambda msg, kind: reports.append((msg, kind)))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_a, **_k: ("", ""))
+    win._export_btn.click()
+
+    assert reports == []
+    assert export_prefs.last_export_dir() == Path.home()
+
+
+def test_failed_export_is_reported(  # type: ignore[no-untyped-def]
+    qapp, qtbot, tmp_path: Path, example_dbc_path: Path, monkeypatch
+) -> None:
+    ctx, win = _paused_capable_plot(qtbot, tmp_path, example_dbc_path)
+    win.add_signal(_SPEED)
+    win._on_frames_received([_engine_frame(6400, t=1.0)])
+    win._paused_btn.click()
+
+    reports: list[tuple[str, str]] = []
+    ctx.events.report_requested.connect(lambda msg, kind: reports.append((msg, kind)))
+    missing = tmp_path / "no-such-dir" / "out.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_a, **_k: (str(missing), ""))
+    win._export_btn.click()
+
+    assert len(reports) == 1
+    assert reports[0][0].startswith("Export failed:")
+    assert reports[0][1] == "error"

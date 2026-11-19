@@ -87,9 +87,6 @@ class BusConfig(BaseModel):
     ``LISTEN_ONLY_INTERFACES``.
     """
 
-    connect_on_startup: bool = False
-    """Open this bus automatically at app launch (``app.py`` acts on it)."""
-
     hw_id: str | None = Field(default=None, exclude=True)
     """The adapter channel this bus is pinned to, in :func:`hw_id_of`'s format.
 
@@ -116,6 +113,15 @@ class BusConfig(BaseModel):
             except ValueError:
                 return data  # refused with a clear error when the bus opens
             data = {**data, "channel": gs_usb_channel(index, device_channel)}
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_connect_on_startup(cls, data: Any) -> Any:
+        # Up to 0.1.2 every saved bus carried ``connect_on_startup``; the
+        # option is gone, and a bus opens only when the user connects it.
+        if isinstance(data, dict) and "connect_on_startup" in data:
+            data = {k: v for k, v in data.items() if k != "connect_on_startup"}
         return data
 
     @model_validator(mode="after")
@@ -171,6 +177,13 @@ def gs_usb_serial_of(hw_id: str, device_channel: int) -> str:
 PCAN_DEFAULT_DEVICE_IDS = (0xFF, 0xFFFFFFFF)
 """Factory-default PCAN device IDs: every adapter nobody numbered shares them."""
 
+KVASER_HWTYPE_VIRTUAL = 0x01
+"""CANlib ``canHWTYPE_VIRTUAL``, the ``"card_type"`` of a Kvaser Virtual channel."""
+
+KVASER_VIRTUAL_PREFIX = "virtual."
+"""Starts the ``hw_id`` of a Kvaser Virtual channel: the only pin a Kvaser
+bus opens with ``accept_virtual`` (``core.bus.BusWorker._open_kvaser``)."""
+
 
 def hw_id_of(interface: str, detected: Mapping[str, object]) -> str | None:
     """The replug-stable identity of one detected channel; ``None`` when it has none.
@@ -178,11 +191,12 @@ def hw_id_of(interface: str, detected: Mapping[str, object]) -> str | None:
     ``detected`` is one ``detect_available_configs`` dict (gs_usb's from
     ``adapter_prober._detect_gs_usb``). pcan: the device ID set in PCAN-View
     and the controller number, ``"{device_id:08x}.{controller}"``; kvaser:
-    the card serial and channel on the card, ``"{serial}.{dongle_channel}"``;
-    ixxat: the unique hardware id, which names the device, not the channel;
-    gs_usb: the USB serial, ``"{serial}:{n}"`` for CAN channel ``n`` > 0 of
-    a multi-channel adapter (so a pin made before multi-channel support,
-    the bare serial, still means channel 0).
+    the card serial and channel on the card, ``"{serial}.{dongle_channel}"``,
+    or ``"virtual.{dongle_channel}"`` for a Virtual channel (by its
+    ``"card_type"``); ixxat: the unique hardware id, which names the device,
+    not the channel; gs_usb: the USB serial, ``"{serial}:{n}"`` for CAN
+    channel ``n`` > 0 of a multi-channel adapter (so a pin made before
+    multi-channel support, the bare serial, still means channel 0).
     """
     if interface == "pcan":
         device_id = detected.get("device_id")
@@ -193,8 +207,12 @@ def hw_id_of(interface: str, detected: Mapping[str, object]) -> str | None:
     if interface == "kvaser":
         serial = detected.get("serial")
         dongle = detected.get("dongle_channel")
-        # CANlib reports serial 0 for its Virtual channels.
-        if not isinstance(serial, int) or not isinstance(dongle, int) or serial == 0:
+        if not isinstance(dongle, int):
+            return None
+        if detected.get("card_type") == KVASER_HWTYPE_VIRTUAL:
+            return f"{KVASER_VIRTUAL_PREFIX}{dongle}"
+        # CANlib reports serial 0 for its Virtual channels and unkeyed ones.
+        if not isinstance(serial, int) or serial == 0:
             return None
         return f"{serial}.{dongle}"
     if interface == "ixxat":

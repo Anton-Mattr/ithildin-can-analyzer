@@ -20,9 +20,41 @@ once it reaches 1.0.
   `"<index>:<n>"`, and its adapter pin as `<serial>:<n>`. A channel start
   the device refuses (a stalled request) fails the bus open with a message
   that says so, instead of a USB error.
+- Export plot data to CSV. Pause a Signal Plot and click **Export** in its
+  header to save the visible signals over the visible time window, with one
+  `time_s` column and one column per signal. Signals from the same frame
+  share a row, and a signal with no sample at that moment leaves its cell
+  empty. Hidden curves are left out. By default the file follows your
+  region's number format (semicolon-separated with a decimal comma where
+  1,5 is written that way). **Settings → Export** can switch it to
+  comma-separated or semicolon-separated.
+- With `--dev`, the Create CAN bus dialog also lists Kvaser's Virtual
+  channels, so you can work with a Kvaser bus without an adapter. A bus
+  made on one stays on it: it follows its Virtual channel when an adapter
+  plugged in later renumbers the channels, and never opens that adapter.
+
+### Removed
+
+- The **Connect on startup** option in the Create CAN bus dialog. A bus
+  opens only when you connect it: **Create & connect**, its status dot in
+  the Buses panel, or **Connect** in the toolbar. A project saved with the
+  option on still opens, with its buses waiting to be connected.
 
 ### Fixed
 
+- A PCAN bus on a computer whose PEAK driver is from before December 2021
+  (PCAN-Basic older than 4.6) failed to open with the driver's
+  invalid-parameter error, although the adapter was listed. It now says
+  that PCAN-Basic is too old and to install the current PEAK driver setup.
+- Pausing a Signal Plot dropped every frame that arrived until you
+  resumed, and the plot then drew a straight line across the gap. The
+  plot now keeps recording while paused and shows it all when you resume.
+  The paused picture, its legend values and **Export** stay as they were
+  at the pause.
+- A Signal Plot kept every sample it had drawn since the capture started,
+  so over a long capture its memory use grew without limit and redrawing
+  it got slower. It now keeps only as many samples per signal as its time
+  window needs.
 - PEAK adapters on macOS are listed as separate devices; MacCAN reports
   no device ID, so they used to merge into a single "PCAN device".
 

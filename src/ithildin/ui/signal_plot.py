@@ -29,15 +29,25 @@ Samples outlive their bus: a bus that stops or degrades breaks its
 curves' lines (a NaN marker) instead of clearing them, and only a new
 capture session clears the plot. The X axis keeps moving while a bus is
 open but silent.
+
+Pause freezes the picture, not the capture: curves keep recording into
+their rings while the plot, legend and Export stay on a snapshot taken
+at the pause (``_SignalCurve.frozen``), and resume redraws each curve
+from its ring, so nothing that arrived meanwhile is lost. While paused,
+Export writes the visible curves over the visible time window to CSV
+(``core/signal_export.py``) from that snapshot: nothing is decoded for it.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import deque
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cantools.database.namedsignalvalue import NamedSignalValue
 from PySide6.QtCore import (
@@ -71,6 +81,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QColorDialog,
+    QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -88,11 +99,18 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
+from ithildin.core.signal_export import ExportColumn, write_signal_csv
 from ithildin.core.types import BusHealth
 from ithildin.ui._child_base import ChildView
 from ithildin.ui._drag_payload import MessagePayload, SignalPayload, pack_into_mime
 from ithildin.ui._gl_plot import GLPlotWidget
 from ithildin.ui._signal_drop import SignalDropArea
+from ithildin.ui.export_prefs import (
+    csv_dialect,
+    last_export_dir,
+    load_csv_format,
+    remember_export_dir,
+)
 from ithildin.ui.fonts import tabular_font
 from ithildin.ui.icons import icon, themed_callback, themed_icon
 from ithildin.ui.theme import ThemeManager, pyqtgraph_palette
@@ -101,6 +119,8 @@ from ithildin.ui.view_header import ViewHeaderBar
 if TYPE_CHECKING:
     from ithildin.app_state.context import AppContext
     from ithildin.core.types import FrameRecord
+
+_log = logging.getLogger(__name__)
 
 
 _DEFAULT_WINDOW_SECONDS = 12.0
@@ -250,6 +270,18 @@ class _SwatchButton(QAbstractButton):
         p.drawEllipse(outer.adjusted(3.5, 3.5, -3.5, -3.5))
 
 
+class _Frozen(NamedTuple):
+    """What a paused plot shows of one curve: its samples and legend value
+    at the pause. The curve's rings keep recording, and may roll past it."""
+
+    times: tuple[float, ...]
+    values: tuple[float, ...]
+    last_value: float | None
+
+
+_NOTHING_FROZEN = _Frozen((), (), None)
+
+
 class _SignalCurve:
     """One subscribed signal: its time series + colour + DBC metadata.
 
@@ -298,9 +330,17 @@ class _SignalCurve:
         self.last_value: float | None = None
         # Bus of the newest sample; ``None`` once its line was broken.
         self.last_bus: str | None = None
+        # Set while the plot is paused.
+        self.frozen: _Frozen | None = None
 
     def color(self) -> QColor:
         return QColor(self._color)
+
+    def shown(self) -> tuple[Sequence[float], Sequence[float]]:
+        """The samples the plot shows: the frozen ones while paused."""
+        if self.frozen is not None:
+            return self.frozen.times, self.frozen.values
+        return self.times, self.values
 
     def set_color(self, color: str | QColor) -> None:
         self._color = QColor(color)
@@ -1051,6 +1091,8 @@ class _SubPlot(QObject):
         self._curves: dict[str, _SignalCurve] = {}
         self._palette = palette
         self._window_seconds = window_seconds
+        # Paused: curves keep recording, but nothing is drawn (``freeze``).
+        self._frozen = False
         # Lazily-built per-bus set of arbitration IDs this sub-plot
         # cares about. Keeps the per-frame admission check to one set
         # membership test.
@@ -1083,6 +1125,7 @@ class _SubPlot(QObject):
 
         self._plot = GLPlotWidget(self._plot_drop)
         self._plot.set_x_range(0.0, self._window_seconds)
+        self._plot.set_segment_limit(_maxlen_for_window(self._window_seconds))
         self._plot.set_close_button_visible(can_remove)
         self._plot.close_clicked.connect(self.remove_requested)
         self._plot_drop.set_inner(self._plot)
@@ -1126,6 +1169,8 @@ class _SubPlot(QObject):
         curve.enum_choices, curve.unit, curve.arbitration_id = self._lookup_signal_meta(
             curve.message, curve.signal
         )
+        if self._frozen:
+            curve.frozen = _NOTHING_FROZEN
         self._curves[path] = curve
         self._plot.add_curve(path, curve.color())
         self._plot.set_curve_unit(path, curve.unit)
@@ -1197,8 +1242,7 @@ class _SubPlot(QObject):
         self._plot.set_curve_unit(curve.path, curve.unit)
         self._plot.set_curve_visible(curve.path, curve.visible)
         self._apply_curve_y_axis(curve)
-        for t, val in zip(curve.times, curve.values, strict=False):
-            self._plot.append_point(curve.path, t, val)
+        self._plot.set_points(curve.path, *curve.shown())
         self.invalidate_wanted_aids()
         sc, tt = self._display_extras(curve.message)
         self._curve_list.add_row(curve, signal_centric=sc, tooltip=tt)
@@ -1297,7 +1341,28 @@ class _SubPlot(QObject):
 
     def refresh_legend_live(self) -> None:
         for path, curve in self._curves.items():
-            self._curve_list.update_live(path, curve.last_value)
+            value = curve.last_value if curve.frozen is None else curve.frozen.last_value
+            self._curve_list.update_live(path, value)
+
+    # ---- Pause ----
+
+    def freeze(self) -> None:
+        """Hold what the plot shows. Curves keep recording, but the plot,
+        the legend and Export stay on the samples they had now."""
+        self._frozen = True
+        for curve in self._curves.values():
+            curve.frozen = _Frozen(tuple(curve.times), tuple(curve.values), curve.last_value)
+
+    def thaw(self) -> None:
+        """Redraw every curve from what it recorded, the pause included."""
+        self._frozen = False
+        for curve in self._curves.values():
+            curve.frozen = None
+            self._plot.set_points(curve.path, curve.times, curve.values)
+            finite = [v for v in curve.values if not math.isnan(v)]
+            if finite:
+                self._maybe_expand_curve_y(curve, min(finite))
+                self._maybe_expand_curve_y(curve, max(finite))
 
     # ---- Ingest ----
 
@@ -1339,8 +1404,9 @@ class _SubPlot(QObject):
             curve.last_bus = frame.bus_name
             curve.times.append(frame.timestamp - t0)
             curve.values.append(fvalue)
-            self._plot.append_point(curve.path, frame.timestamp - t0, fvalue)
-            self._maybe_expand_curve_y(curve, fvalue)
+            if not self._frozen:
+                self._plot.append_point(curve.path, frame.timestamp - t0, fvalue)
+                self._maybe_expand_curve_y(curve, fvalue)
 
     def break_bus(self, bus_name: str) -> None:
         """Break the line of every curve last fed by ``bus_name``.
@@ -1355,13 +1421,44 @@ class _SubPlot(QObject):
             t = curve.times[-1]
             curve.times.append(t)
             curve.values.append(math.nan)
-            self._plot.append_point(curve.path, t, math.nan)
+            if not self._frozen:
+                self._plot.append_point(curve.path, t, math.nan)
 
     def latest_time(self) -> float | None:
         return max(
             (curve.times[-1] for curve in self._curves.values() if curve.times),
             default=None,
         )
+
+    def has_samples_since(self, t: float) -> bool:
+        """Whether a visible curve shows a real (non-NaN) sample at or after ``t``."""
+        for curve in self._curves.values():
+            if not curve.visible:
+                continue
+            times, values = curve.shown()
+            for st, value in zip(reversed(times), reversed(values), strict=True):
+                if st < t:
+                    break
+                if not math.isnan(value):
+                    return True
+        return False
+
+    def export_columns(self) -> list[ExportColumn]:
+        """The visible curves in legend order, each with a copy of the samples
+        it shows."""
+        columns = []
+        for curve in self._curves.values():
+            if not curve.visible:
+                continue
+            times, values = curve.shown()
+            columns.append(
+                ExportColumn(
+                    header=f"{curve.path} [{curve.unit}]" if curve.unit else curve.path,
+                    times=list(times),
+                    values=list(values),
+                )
+            )
+        return columns
 
     def set_x_range(self, lo: float, hi: float) -> None:
         self._plot.set_x_range(lo, hi)
@@ -1432,6 +1529,8 @@ class _SubPlot(QObject):
             curve.values.clear()
             curve.last_value = None
             curve.last_bus = None
+            if curve.frozen is not None:
+                curve.frozen = _NOTHING_FROZEN
             self._plot.clear_curve(curve.path)
             # Reset numeric range so the next sample re-seeds it.
             # Categorical curves keep their pinned [0, N-1] range.
@@ -1445,6 +1544,7 @@ class _SubPlot(QObject):
         """Resize per-curve buffers, preserving the most recent samples."""
         self._window_seconds = seconds
         new_max = _maxlen_for_window(seconds)
+        self._plot.set_segment_limit(new_max)
         for curve in self._curves.values():
             if curve.times.maxlen == new_max:
                 continue
@@ -1688,7 +1788,9 @@ class SignalPlotWindow(ChildView):
         self._paused_btn.setCheckable(True)
         self._paused_btn.setAutoExclusive(False)
         self._paused_btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        self._paused_btn.setToolTip("Freeze the plot; new frames are dropped.")
+        self._paused_btn.setToolTip(
+            "Freeze the plot. Frames keep being recorded and show when you resume."
+        )
 
         self._pause_group = QButtonGroup(self)
         self._pause_group.setExclusive(True)
@@ -1700,6 +1802,15 @@ class SignalPlotWindow(ChildView):
         pause_layout.addWidget(self._running_btn)
         pause_layout.addWidget(self._paused_btn)
         top_strip.add_widget(self._pause_segment)
+
+        self._export_btn = QToolButton(top_strip)
+        self._export_btn.setAutoRaise(True)
+        self._export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        themed_icon("export", self._export_btn.setIcon)
+        self._export_btn.clicked.connect(self._on_export_clicked)
+        self._export_tip: str | None = None
+        self._sync_export_enabled()
+        top_strip.add_widget(self._export_btn)
 
         self._window_btn = QToolButton(top_strip)
         self._window_btn.setAutoRaise(True)
@@ -1795,6 +1906,8 @@ class SignalPlotWindow(ChildView):
         )
         if self._ctx is not None:
             sp.bind_context(self._ctx)
+        if self._paused:
+            sp.freeze()
         sp.remove_requested.connect(lambda s=sp: self._remove_subplot(s))
         sp.move_in_requested.connect(self._on_move_in)
         self._left_v_splitter.insertWidget(idx, sp.legend_widget)
@@ -1877,7 +1990,9 @@ class SignalPlotWindow(ChildView):
     # ---- Frame dispatch + shared X ----
 
     def _on_frames_received(self, batch: list[Any]) -> None:
-        if self._ctx is None or not self._subplots or self._paused:
+        # Paused too: the curves keep recording what the plot will show on
+        # resume; only the drawing stops.
+        if self._ctx is None or not self._subplots:
             return
         for sp in self._subplots:
             if not sp._curves:
@@ -1894,7 +2009,8 @@ class SignalPlotWindow(ChildView):
         if self._sample_hi is None or latest > self._sample_hi:
             self._sample_hi = latest
             self._sample_wall = time.monotonic()
-        self._show_x(latest)
+        if not self._paused:
+            self._show_x(latest)
 
     def _advance_x_idle(self) -> None:
         if (
@@ -1935,6 +2051,7 @@ class SignalPlotWindow(ChildView):
             lo = hi - seconds
         for sp in self._subplots:
             sp.set_x_range(lo, hi)
+        self._sync_export_enabled()
 
     def _sync_window_button_text(self) -> None:
         btn = getattr(self, "_window_btn", None)
@@ -1972,6 +2089,7 @@ class SignalPlotWindow(ChildView):
         self._shown_hi = None
         for sp in self._subplots:
             sp.clear_session()
+        self._sync_export_enabled()
 
     def _on_bus_stopped(self, bus_name: str) -> None:
         for sp in self._subplots:
@@ -1994,6 +2112,75 @@ class SignalPlotWindow(ChildView):
         for sp in self._subplots:
             sp.refresh_legend_live()
         self._advance_x_idle()
+        # Also catches curves added, removed, hidden or shown while paused.
+        self._sync_export_enabled()
+
+    # ---- CSV export ----
+
+    def _export_span(self) -> tuple[float, float] | None:
+        if self._shown_hi is None:
+            return None
+        return self._shown_hi - self._window_seconds, self._shown_hi
+
+    def _sync_export_enabled(self) -> None:
+        span = self._export_span()
+        if not self._paused:
+            tip = "Pause the plot to export what it shows"
+        elif span is None or not any(sp.has_samples_since(span[0]) for sp in self._subplots):
+            tip = "No samples in the visible time window"
+        else:
+            tip = ""
+        if tip == self._export_tip:
+            return
+        self._export_tip = tip
+        self._export_btn.setEnabled(not tip)
+        self._export_btn.setToolTip(
+            tip or "Export CSV… — the visible signals over the visible time window"
+        )
+
+    def _on_export_clicked(self) -> None:
+        span = self._export_span()
+        if span is None:
+            return
+        columns: list[ExportColumn] = []
+        seen: set[str] = set()
+        for sp in self._subplots:
+            for column in sp.export_columns():
+                if column.header not in seen:
+                    seen.add(column.header)
+                    columns.append(column)
+        if not columns:
+            return
+        default = last_export_dir() / f"plot_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, "Export plot data", str(default), "CSV (*.csv)"
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        if not path.suffix:
+            path = path.with_suffix(".csv")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            rows = write_signal_csv(
+                path,
+                columns,
+                t_lo=span[0],
+                t_hi=span[1],
+                dialect=csv_dialect(load_csv_format()),
+            )
+        except OSError as exc:
+            _log.warning("Plot export to %s failed", path, exc_info=True)
+            if self._ctx is not None:
+                self._ctx.events.report_requested.emit(f"Export failed: {exc}", "error")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        remember_export_dir(path.parent)
+        if self._ctx is not None:
+            self._ctx.events.report_requested.emit(
+                f"Exported {rows} rows × {len(columns)} signals to {path}", "info"
+            )
 
     # ---- Left column toggle ----
 
@@ -2025,7 +2212,18 @@ class SignalPlotWindow(ChildView):
         self._add_subplot()
 
     def _on_pause_selected(self, paused: bool) -> None:
-        self._paused = paused
+        # Clicking the checked half of the segment selects it again.
+        if paused != self._paused:
+            self._paused = paused
+            for sp in self._subplots:
+                if paused:
+                    sp.freeze()
+                else:
+                    sp.thaw()
+            if not paused:
+                self._advance_x_window()
+                self._advance_x_idle()
+        self._sync_export_enabled()
 
     # ---- Public API (delegates) ----
 

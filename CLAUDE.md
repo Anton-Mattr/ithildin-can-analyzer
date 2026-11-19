@@ -167,6 +167,11 @@ MCP layer (`src/ithildin/mcp/`):
   a long recording, and a closed Record window may have left one writing.
   Quit then calls `app._finish`: `bus_reader.shutdown()`, and `os._exit`
   only when a worker is still stuck (a running QThread can't be destroyed).
+  `shutdown()` waits for every controller the reader still owns, not only
+  the open and retiring ones: after `bus_failed` the failed worker's thread
+  is still exiting, and destroying it then aborts, or hangs for good if it
+  is mid-`finished`. So never free a reader before `shutdown()` returns
+  `[]` — a test's bare `close()` doesn't wait for a bus that failed.
 - **One send lock per bus.** `BusWorker._send_lock` serialises every
   touch of a python-can bus other than `recv()`: `send` (from any
   thread), cyclic tasks, task creation, the TX flush and `_close_bus`.
@@ -277,7 +282,8 @@ MCP layer (`src/ithildin/mcp/`):
   restart. `register_prober` before `thread.start()`. The `virtual` loopback
   is a dev-only surface: it's emitted by the prober and seeded in the
   Create-bus dialog **only** when `adapter_prober.dev_mode()` is on
-  (`ITHILDIN_DEV` env / `--dev` launch flag). Normal users never see it;
+  (`ITHILDIN_DEV` env / `--dev` launch flag), and so are Kvaser Virtual
+  channels (`enrich(include_virtual=)`). Normal users never see them;
   the test suite still uses the `virtual` backend directly (it stays a
   valid `SupportedInterface`).
 - **gs_usb (CANable / CANtact / candleLight) goes through `GsUsbBus`.**
@@ -335,16 +341,21 @@ MCP layer (`src/ithildin/mcp/`):
   than a timeout), an open after 10 s or once its bus is stopped. Kvaser
   buses open through `BusWorker._open_kvaser`: `accept_virtual=False` (a
   number shifted by an unplugged adapter must fail, not open a Kvaser
-  Virtual channel, so the enricher hides Virtual channels by card type),
-  and only CANlib preset bitrates, checked before any driver call
-  (`KvaserBus` leaks an init-access handle when CANlib refuses one; the
-  Create dialog offers no 800 kbit/s for Kvaser). Listen-only uses a
+  Virtual channel) unless the bus is pinned to a Virtual channel
+  (`virtual.N`, told apart by the `card_type` `detect_configs` folds in;
+  such a pin never resolves to an adapter). The enricher lists Virtual
+  channels in dev mode only. Only CANlib preset bitrates, checked before
+  any driver call (`KvaserBus` leaks an init-access handle when CANlib
+  refuses one; the Create dialog offers no 800 kbit/s for Kvaser). Listen-only uses a
   single handle: python-can sets silent mode on its write handle, which
   has no init access.
 - **PCAN buses open through `BusWorker._open_pcan`.** Only PCAN-Basic
   preset bitrates (`PCAN_BITRATES`), checked before any driver call:
   `PcanBus` runs any other rate at 500 kbit/s without a word (the Create
-  dialog's default rates are all presets). An open that fails after
+  dialog's default rates are all presets). Then PCAN-Basic ≥ 4.6, before
+  any channel call: every open sets echo frames (`receive_own_messages`),
+  which 4.4 and 4.5 refuse after Initialize though they list the adapters.
+  An open that fails after
   `CAN_Initialize` initialised the channel — a later step failed, or
   Initialize returned CAUTION — uninitialises it, or every later open of
   it fails until a restart. Whether this open initialised it comes from
@@ -362,7 +373,8 @@ MCP layer (`src/ithildin/mcp/`):
   (`Field(exclude=True)`, so never in the git-shared `.itp`) pins a bus to
   one adapter channel, in `schema.hw_id_of`'s format: pcan device ID (set
   in PCAN-View; the factory 0xFF / 0xFFFFFFFF identify nothing) +
-  controller, kvaser serial + channel on the card, IXXAT unique hardware
+  controller, kvaser serial + channel on the card (`virtual.` + channel for
+  a Kvaser Virtual channel), IXXAT unique hardware
   id, gs_usb USB serial (`:<n>` for channel n > 0). Pins live in `~/.ithildin/<project>/adapter_pins.json`
   (bus name → hw_id, atomic `os.replace`), loaded by `open_or_migrate` and
   written by `Project.save()` / `save_adapter_pins()`. A pin is set only by
@@ -438,7 +450,9 @@ etc. over hard-coding hex. When you need a colour from Python, read
 theme-tinted multi-size `QIcon` cached by `(name, tint)`. Bundled SVGs
 live in `src/ithildin/resources/icons/`; they paint with
 `stroke="currentColor"` (or `fill="currentColor"` for filled glyphs)
-and are rewritten at load time to the active `fg_1`. The cache is
+and are rewritten at load time to the active `fg_1`, plus a Disabled-mode
+pixmap in `fg_3` (the disabled-text token): Qt's generated one greys a grey
+glyph into the same grey, so a disabled button looked live. The cache is
 cleared on `ThemeManager.theme_changed`. `toggle_icon(off, on)` makes a
 two-state icon for checkable buttons.
 
@@ -498,6 +512,38 @@ the `application/x-ithildin-signal` MIME type. Drop-target widgets use
 `ui/_signal_drop.py`'s `SignalDropArea` wrapper around any pyqtgraph
 widget (drops on the inner GraphicsView don't propagate reliably).
 
+### Signal Plot samples, pause and export
+
+Each curve's samples live in two rings (`_SignalCurve.times` / `values`,
+`maxlen = _maxlen_for_window(window)`: one window at 1 kHz, 1024 to
+200 000). `GLPlotWidget` draws from its own float32 segment buffer, which
+`set_segment_limit` bounds to the same count plus a quarter of slack, so
+memory and the per-paint upload don't grow with the capture. Rebuild a
+curve's line with `set_points` (vectorised), never a loop of
+`append_point`.
+
+Pause freezes the picture, not the capture. Frames keep going into the
+rings (filtered to the plotted IDs first, as when running) while the
+sub-plots are frozen: nothing is drawn, the X axis and Y ranges hold, and
+`_SignalCurve.frozen` keeps the samples and legend value from the pause,
+which the plot, legend and Export use (`_SignalCurve.shown()`), since a
+long pause rolls the rings past them. A curve added or moved while paused
+follows the same snapshot. Resume (`_SubPlot.thaw`) redraws each curve
+from its ring, which always covers the visible window, so there is no gap
+and no line drawn across one.
+
+The Signal Plot's Export button works only while paused. It writes the
+visible curves over the visible time window (`[shown_hi − window, shown_hi]`)
+from the pause's snapshot, so it decodes nothing.
+`core/signal_export.py` is the Qt-free writer: wide CSV, one row per
+distinct timestamp, blank cells where a signal has no sample, NaN
+line-break markers skipped, UTF-8 with BOM for Excel. The CSV format
+(system locale / comma / semicolon) and the last export folder are
+user-scoped `QSettings` in `ui/export_prefs.py`, never the `.itp`: the
+format follows the user's spreadsheet locale, not the project. The test
+conftest points that module's `SETTINGS_ORG` / `SETTINGS_APP` at the
+test org, as it does for the dock and theme.
+
 ## Coding conventions
 
 - Default to writing **no comments**. Add one only when the *why* is
@@ -533,7 +579,10 @@ widget (drops on the inner GraphicsView don't propagate reliably).
   requests, channel-tagged bulk frames, stalls) in
   `tests/test_gs_usb_bus.py`, and `_open_pcan` runs
   python-can's own `PcanBus` against a fake PCAN-Basic driver
-  (`tests/test_bus.py::_PcanBasic`). `fake_bus.LiveReader` makes named
+  (`fake_bus.FakePcanBasic`), which any test that opens a pcan bus through
+  `_open_pcan` needs, a pinned one included: it loads PCAN-Basic and
+  checks its version before resolving the pin, and CI has no PEAK driver.
+  `fake_bus.LiveReader` makes named
   buses read as open and live where only their names matter (MCP sends).
 - The conftest fails a test whose `make_app_context` reader still has a
   worker running after `shutdown()`; a reader a test builds itself ends
@@ -592,6 +641,7 @@ docs as if they exist.
 - **Replay pause / scrub.** `core/replay.py` plays linearly from start
   to end. The Replay window discloses this in its hint.
 - **Settings dialog content.** `ui/settings_window.py` exposes only the
-  Project · Plot defaults section. Capture / MCP sections land in v0.2.
+  Project · Plot defaults section and the Export · CSV format choice.
+  Capture / MCP sections land in v0.2.
 - **Frame inspector bit-spanning hover highlight.** Byte cells render
   but bit-level highlight is a Stage 1.E polish item, not done.
