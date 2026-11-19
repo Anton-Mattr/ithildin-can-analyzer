@@ -55,17 +55,16 @@ def test_loopback_hidden_in_normal_mode_shows_empty_hint(  # type: ignore[no-unt
     qapp, qtbot, monkeypatch
 ) -> None:
     """With dev mode off and no hardware, the virtual loopback is not
-    seeded: the device list is empty, the empty-state hint is shown, and
-    neither create button is enabled."""
+    seeded: only the hand-added socketcand device is offered and the
+    no-adapters hint is shown."""
     monkeypatch.delenv("ITHILDIN_DEV", raising=False)
     dlg = _make_dialog(qtbot)
     qtbot.waitUntil(lambda: dlg._prober is None, timeout=2000)  # probe done
-    assert dlg._device_combo.count() == 0
-    assert dlg._current_device() is None
+    assert dlg._device_combo.count() == 1
+    device = dlg._current_device()
+    assert device is not None and device.interface == "socketcand"
     assert dlg._empty_hint.isVisible()
     assert not dlg._info_strip.isVisible()
-    assert not dlg._create_btn.isEnabled()
-    assert not dlg._connect_btn.isEnabled()
 
 
 def test_empty_name_disables_create(qapp, qtbot) -> None:  # type: ignore[no-untyped-def]

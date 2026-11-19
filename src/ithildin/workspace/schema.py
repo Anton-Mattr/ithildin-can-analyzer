@@ -38,21 +38,30 @@ SupportedInterface = Literal[
     "socketcan",
     "virtual",
     "ixxat",
+    "socketcand",
 ]
 """python-can backends ithildin officially supports."""
 
-LISTEN_ONLY_INTERFACES: frozenset[str] = frozenset({"pcan", "kvaser", "gs_usb", "virtual"})
+LISTEN_ONLY_INTERFACES: frozenset[str] = frozenset(
+    {"pcan", "kvaser", "gs_usb", "virtual", "socketcand"}
+)
 """Interfaces for which ``listen_only=True`` is honored.
 
 ``pcan`` / ``kvaser`` receive a native silent kwarg (see
 ``core.bus._apply_listen_only_kwargs``); ``gs_usb`` takes
 ``GsUsbBus(listen_only=True)``, which refuses to open when the adapter's
 firmware has no listen-only mode; ``virtual`` has no wire so the
-app-level send block alone is sufficient. ``socketcan`` (silent mode is an
+app-level send block alone is sufficient, and so does ``socketcand``
+(a TCP link to a daemon: nothing of ours ACKs on a CAN wire). ``socketcan`` (silent mode is an
 OS-level ``ip link ... listen-only`` netlink property, not a python-can
 constructor kwarg) and ``ixxat`` (the VCI wrapper hardcodes its opmode) have
 no python-can kwarg ithildin can set, so the combo is rejected rather than
 degrading to a bus that still ACKs on the wire."""
+
+
+SOCKETCAND_DEFAULT_HOST = "127.0.0.1"
+SOCKETCAND_DEFAULT_PORT = 29536
+"""bms-sim's CAN bridge address."""
 
 
 class BusConfig(BaseModel):
@@ -86,6 +95,13 @@ class BusConfig(BaseModel):
     a bus that still ACKs on the wire. The honored set is
     ``LISTEN_ONLY_INTERFACES``.
     """
+
+    host: str | None = None
+    port: int | None = Field(default=None, gt=0, lt=65535)
+    """Where a ``socketcand`` daemon listens (``None`` on every other
+    interface; a socketcand bus without them gets the sim bridge's
+    ``127.0.0.1:29536``). ``channel`` is then the daemon's interface name
+    (``can0``) and ``bitrate`` is ignored: the daemon owns the CAN side."""
 
     hw_id: str | None = Field(default=None, exclude=True)
     """The adapter channel this bus is pinned to, in :func:`hw_id_of`'s format.
@@ -123,6 +139,17 @@ class BusConfig(BaseModel):
         if isinstance(data, dict) and "connect_on_startup" in data:
             data = {k: v for k, v in data.items() if k != "connect_on_startup"}
         return data
+
+    @model_validator(mode="after")
+    def _socketcand_address(self) -> BusConfig:
+        if self.interface == "socketcand":
+            if self.host is None:
+                self.host = SOCKETCAND_DEFAULT_HOST
+            if self.port is None:
+                self.port = SOCKETCAND_DEFAULT_PORT
+        elif self.host is not None or self.port is not None:
+            raise ValueError("host and port apply only to the socketcand interface")
+        return self
 
     @model_validator(mode="after")
     def _reject_unsupported_listen_only(self) -> BusConfig:

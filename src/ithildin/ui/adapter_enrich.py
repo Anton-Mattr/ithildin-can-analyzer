@@ -44,7 +44,7 @@ from ithildin.workspace.schema import (
 
 ChannelStatus = Literal["free", "in-use", "offline"]
 DeviceStatus = Literal["available", "in-use", "offline"]
-Transport = Literal["USB", "Kernel", "Software", "Unknown"]
+Transport = Literal["USB", "Kernel", "Software", "Network", "Unknown"]
 
 # PCAN channel_condition bit flags (mirrored from PCANBasic to avoid
 # importing the backend just to read three constants).

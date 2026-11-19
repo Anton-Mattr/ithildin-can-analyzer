@@ -20,6 +20,13 @@ once it reaches 1.0.
   `"<index>:<n>"`, and its adapter pin as `<serial>:<n>`. A channel start
   the device refuses (a stalled request) fails the bus open with a message
   that says so, instead of a USB error.
+- socketcand buses. Create CAN bus lists a hand-added **socketcand (TCP)**
+  device: type the host and port (default `127.0.0.1:29536`, the address of
+  bms-sim's CAN bridge) and the daemon's interface (`can0` / `can1`, or any
+  name). It is never probed, since python-can finds socketcand through UDP
+  beacons that bms-sim does not send. A socketcand bus has no baud rate.
+  The daemon does not echo a client's own frames, so Ithildin adds the
+  frames it sends to the Trace itself, tagged TX.
 - Export plot data to CSV. Pause a Signal Plot and click **Export** in its
   header to save the visible signals over the visible time window, with one
   `time_s` column and one column per signal. Signals from the same frame

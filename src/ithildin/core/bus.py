@@ -447,6 +447,8 @@ class BusWorker(QObject):
             return self._open_pcan(kwargs)
         if self._config.interface == "ixxat" and self._config.hw_id is not None:
             return self._open_ixxat(kwargs, self._config.hw_id)
+        if self._config.interface == "socketcand":
+            return self._open_socketcand()
         return can.Bus(**kwargs)
 
     def _open_gs_usb(self) -> can.BusABC:
@@ -469,6 +471,41 @@ class BusWorker(QObject):
             )
         finally:
             GS_USB_LOCK.release()
+
+    def _open_socketcand(self) -> can.BusABC:
+        # No bitrate (the daemon owns the CAN side) and no receive_own_messages
+        # (python-can ignores it here). tcp_tune stays off: it is a Linux-only
+        # socket option and python-can only warns about it elsewhere.
+        bus = can.Bus(
+            interface="socketcand",
+            channel=self._config.channel,
+            host=self._config.host,
+            port=self._config.port,
+            tcp_tune=False,
+        )
+        # socketcand never sends a client its own frames back, so echo them
+        # into the ring ourselves, tagged TX like the other backends do.
+        # Wrapping send covers cyclic tasks too: they call bus.send directly.
+        send = bus.send
+
+        def send_and_echo(msg: can.Message, timeout: float | None = None) -> None:
+            send(msg, timeout)
+            self._ring.append(
+                FrameRecord(
+                    bus_name=self._name,
+                    timestamp=time.time(),
+                    arbitration_id=msg.arbitration_id,
+                    data=bytes(msg.data),
+                    is_extended_id=msg.is_extended_id,
+                    is_fd=bool(getattr(msg, "is_fd", False)),
+                    is_error_frame=False,
+                    is_remote_frame=msg.is_remote_frame,
+                    is_rx=False,
+                )
+            )
+
+        cast(Any, bus).send = send_and_echo
+        return bus
 
     def _open_ixxat(self, kwargs: dict[str, Any], hw_id: str) -> can.BusABC:
         from can.interfaces.ixxat.exceptions import VCIDeviceNotFoundError

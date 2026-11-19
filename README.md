@@ -17,7 +17,8 @@ A cross-platform (Windows, Linux and macOS) CAN bus analyser aimed at the gap
 between [BusMaster](https://rbei-etas.github.io/busmaster/) (free but
 dated UX) and [CAN Easy](https://www.ixxat.com/can-easy) (better UX but
 proprietary). It captures CAN traffic from PEAK, Kvaser, CANable /
-CANtact / candleLight, and IXXAT hardware (plus SocketCAN on Linux; only
+CANtact / candleLight, and IXXAT hardware (plus SocketCAN on Linux, and any
+[socketcand](https://github.com/linux-can/socketcand) daemon over TCP; only
 PEAK and CANable / candleLight on macOS), decodes via DBC files, logs and
 replays sessions, and ships a built-in MCP server so AI agents can observe
 traffic and (under strict per-message/per-signal allowlists) transmit

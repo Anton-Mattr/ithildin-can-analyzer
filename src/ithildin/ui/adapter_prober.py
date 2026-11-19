@@ -142,6 +142,25 @@ def virtual_device() -> DeviceInfo:
     )
 
 
+def socketcand_device() -> DeviceInfo:
+    """The hand-added "socketcand (TCP)" entry of the Create dialog.
+
+    Never probed: python-can detects socketcand by waiting for UDP beacons,
+    which bms-sim's bridge does not send, and a TCP connect at every rescan
+    would open a session on the daemon. The user types host and port.
+    """
+    return DeviceInfo(
+        interface="socketcand",
+        vendor="socketcand",
+        model="TCP",
+        transport="Network",
+        channels=(
+            ChannelInfo(channel="can0", label="can0"),
+            ChannelInfo(channel="can1", label="can1"),
+        ),
+    )
+
+
 class AdapterProber(QObject):
     """Probe each supported python-can backend on a worker thread.
 
